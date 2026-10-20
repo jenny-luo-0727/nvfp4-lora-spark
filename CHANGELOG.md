@@ -19,6 +19,13 @@ All notable changes to nybbloris. The format follows
 - README gains a table of contents, status badges, and a [documentation index](docs/README.md);
   the VLM serving story now documents the runtime-LoRA path for the LLM half.
 
+### Fixed
+- **Router correction bias kept in FP32.** `load_non_nvfp4_weights` loads a buffer in FP32 when
+  the model lists it in `_keep_in_fp32_modules_strict`, or registers it in FP32 and the checkpoint
+  stores it in FP32. It used to cast it to BF16, which collapsed each Nemotron-H router's
+  `e_score_correction_bias` (503 distinct values to 2 at Nemotron 3 Super's last MoE layer) and
+  changed the top-22 expert selection. (#41)
+
 ## [1.9] - 2026-07-06
 Fine-tune the LLM **and** the vision tower together (`--train-target both`): one run over a
 mixed image+text dataset, dual LoRA scopes (native LLM + bf16 tower), validated end to end

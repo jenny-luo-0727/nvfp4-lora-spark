@@ -1070,6 +1070,31 @@ def replace_nvfp4_modules_pooled(
 # Non-NVFP4 weight loading (norms, embeddings, conv1d, Mamba SSM state, lm_head)
 # --------------------------------------------------------------------------------------
 
+def _wants_fp32_buffer(model: nn.Module, model_key: str, tensor: torch.Tensor, existing) -> bool:
+    """True when an on-disk tensor feeds a buffer the model wants kept in FP32.
+
+    A model says so in one of two ways:
+    - its class lists the name in `_keep_in_fp32_modules_strict`, which `from_pretrained` honors
+      and this loader would otherwise bypass (transformers' native Nemotron-H and GLM-4-MoE list
+      `e_score_correction_bias`);
+    - its code registers the buffer in FP32 and the checkpoint also stores it in FP32 (Nemotron-H
+      remote code, e.g. Nemotron 3 Super). The checkpoint must agree, because a model built at the
+      default FP32 dtype has every slot in FP32.
+
+    A router's `e_score_correction_bias` needs this: its per-expert differences are finer than
+    BF16's spacing at its magnitude, so a BF16 cast collapses the values and changes which experts
+    the top-k selects. Parameters are out of scope and still follow the requested dtype.
+    """
+    if not isinstance(existing, torch.Tensor) or isinstance(existing, nn.Parameter):
+        return False
+    if not tensor.dtype.is_floating_point or tensor.dtype == torch.float8_e4m3fn:
+        return False
+    keep_strict = getattr(model, "_keep_in_fp32_modules_strict", None) or ()
+    if any(f".{name}." in f".{model_key}." for name in keep_strict):
+        return True
+    return tensor.dtype == torch.float32 and existing.dtype == torch.float32
+
+
 def load_non_nvfp4_weights(
     model: nn.Module,
     model_dir: str | Path,
@@ -1161,7 +1186,11 @@ def load_non_nvfp4_weights(
         # Determine dtype to use:
         # - bf16 for general weights / norms / embeddings
         # - keep original dtype for special params (e.g., A_log, D, dt_bias for Mamba; they're often float32)
-        target_dtype = dtype if tensor.dtype.is_floating_point and tensor.dtype != torch.float8_e4m3fn else tensor.dtype
+        # - fp32 for a buffer the model wants kept in FP32 (see `_wants_fp32_buffer`)
+        if _wants_fp32_buffer(model, model_key, tensor, getattr(parent, attr, None)):
+            target_dtype = torch.float32
+        else:
+            target_dtype = dtype if tensor.dtype.is_floating_point and tensor.dtype != torch.float8_e4m3fn else tensor.dtype
         try:
             # Replace meta-tensor with real one
             t = tensor.to(device=device, dtype=target_dtype).contiguous()
